@@ -25,8 +25,9 @@ from __future__ import annotations
 
 import inspect
 import discord
+import logging
 from discord import app_commands
-from discord.utils import maybe_coroutine
+from discord.utils import maybe_coroutine, _to_kebab_case
 
 from typing import (
     Any,
@@ -50,6 +51,7 @@ from ._types import _BaseCommand, BotT
 if TYPE_CHECKING:
     from typing_extensions import Self
     from discord.abc import Snowflake
+    from discord._types import ClientT
 
     from .bot import BotBase
     from .context import Context
@@ -64,6 +66,7 @@ __all__ = (
 FuncT = TypeVar('FuncT', bound=Callable[..., Any])
 
 MISSING: Any = discord.utils.MISSING
+_log = logging.getLogger(__name__)
 
 
 class CogMeta(type):
@@ -182,7 +185,7 @@ class CogMeta(type):
             try:
                 group_name = kwargs.pop('group_name')
             except KeyError:
-                group_name = app_commands.commands._to_kebab_case(name)
+                group_name = _to_kebab_case(name)
         else:
             group_name = kwargs.pop('group_name', cog_name)
 
@@ -304,6 +307,7 @@ class Cog(metaclass=CogMeta):
 
         # Register the application commands
         children: List[Union[app_commands.Group, app_commands.Command[Self, ..., Any]]] = []
+        app_command_refs: Dict[str, Union[app_commands.Group, app_commands.Command[Self, ..., Any]]] = {}
 
         if cls.__cog_is_app_commands_group__:
             group = app_commands.Group(
@@ -330,6 +334,16 @@ class Cog(metaclass=CogMeta):
                 # Get the latest parent reference
                 parent = lookup[parent.qualified_name]  # type: ignore
 
+                # Hybrid commands already deal with updating the reference
+                # Due to the copy below, so we need to handle them specially
+                if hasattr(parent, '__commands_is_hybrid__') and hasattr(command, '__commands_is_hybrid__'):
+                    current: Optional[Union[app_commands.Group, app_commands.Command[Self, ..., Any]]] = getattr(
+                        command, 'app_command', None
+                    )
+                    updated = app_command_refs.get(command.qualified_name)
+                    if current and updated:
+                        command.app_command = updated  # type: ignore  # Safe attribute access
+
                 # Update our parent's reference to our self
                 parent.remove_command(command.name)  # type: ignore
                 parent.add_command(command)  # type: ignore
@@ -338,11 +352,18 @@ class Cog(metaclass=CogMeta):
                 app_command: Optional[Union[app_commands.Group, app_commands.Command[Self, ..., Any]]] = getattr(
                     command, 'app_command', None
                 )
-                if app_command is not None:
+                if app_command:
                     group_parent = self.__cog_app_commands_group__
                     app_command = app_command._copy_with(parent=group_parent, binding=self)
                     # The type checker does not see the app_command attribute even though it exists
                     command.app_command = app_command  # type: ignore
+
+                    # Update all the references to point to the new copy
+                    if isinstance(app_command, app_commands.Group):
+                        for child in app_command.walk_commands():
+                            app_command_refs[child.qualified_name] = child
+                            if hasattr(child, '__commands_is_hybrid_app_command__') and child.qualified_name in lookup:
+                                child.wrapped = lookup[child.qualified_name]  # type: ignore
 
                     if self.__cog_app_commands_group__:
                         children.append(app_command)  # type: ignore # Somehow it thinks it can be None here
@@ -376,7 +397,7 @@ class Cog(metaclass=CogMeta):
             if len(mapping) > 25:
                 raise TypeError('maximum number of application command children exceeded')
 
-            self.__cog_app_commands_group__._children = mapping  # type: ignore  # Variance issue
+            self.__cog_app_commands_group__._children = mapping
 
         return self
 
@@ -549,6 +570,8 @@ class Cog(metaclass=CogMeta):
 
         Subclasses must replace this if they want special unloading behaviour.
 
+        Exceptions raised in this method are ignored during extension unloading.
+
         .. versionchanged:: 2.0
 
             This method can now be a :term:`coroutine`.
@@ -582,6 +605,18 @@ class Cog(metaclass=CogMeta):
 
         This function **can** be a coroutine and must take a sole parameter,
         ``ctx``, to represent the :class:`.Context`.
+        """
+        return True
+
+    @_cog_special_method
+    def interaction_check(self, interaction: discord.Interaction[ClientT], /) -> bool:
+        """A special method that registers as a :func:`discord.app_commands.check`
+        for every app command and subcommand in this cog.
+
+        This function **can** be a coroutine and must take a sole parameter,
+        ``interaction``, to represent the :class:`~discord.Interaction`.
+
+        .. versionadded:: 2.0
         """
         return True
 
@@ -738,7 +773,7 @@ class Cog(metaclass=CogMeta):
             try:
                 await maybe_coroutine(self.cog_unload)
             except Exception:
-                pass
+                _log.exception('Ignoring exception in cog unload for Cog %r (%r)', cls, self.qualified_name)
 
 
 class GroupCog(Cog):
@@ -752,8 +787,8 @@ class GroupCog(Cog):
     and :func:`~discord.app_commands.default_permissions` will apply to the group if used on top of the
     cog.
 
-    Hybrid commands will also be added to the Group, giving the ability categorize slash commands into
-    groups, while keeping the prefix-style commmand as a root-level command.
+    Hybrid commands will also be added to the Group, giving the ability to categorize slash commands into
+    groups, while keeping the prefix-style command as a root-level command.
 
     For example:
 

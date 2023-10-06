@@ -48,7 +48,7 @@ from typing import (
 
 from .object import OLDEST_OBJECT, Object
 from .context_managers import Typing
-from .enums import ChannelType
+from .enums import ChannelType, InviteTarget
 from .errors import ClientException
 from .mentions import AllowedMentions
 from .permissions import PermissionOverwrite, Permissions
@@ -83,9 +83,16 @@ if TYPE_CHECKING:
     from .channel import CategoryChannel
     from .embeds import Embed
     from .message import Message, MessageReference, PartialMessage
-    from .channel import TextChannel, DMChannel, GroupChannel, PartialMessageable, VoiceChannel
+    from .channel import (
+        TextChannel,
+        DMChannel,
+        GroupChannel,
+        PartialMessageable,
+        VocalGuildChannel,
+        VoiceChannel,
+        StageChannel,
+    )
     from .threads import Thread
-    from .enums import InviteTarget
     from .ui.view import View
     from .types.channel import (
         PermissionOverwrite as PermissionOverwritePayload,
@@ -97,7 +104,7 @@ if TYPE_CHECKING:
         SnowflakeList,
     )
 
-    PartialMessageableChannel = Union[TextChannel, VoiceChannel, Thread, DMChannel, PartialMessageable]
+    PartialMessageableChannel = Union[TextChannel, VoiceChannel, StageChannel, Thread, DMChannel, PartialMessageable]
     MessageableChannel = Union[PartialMessageableChannel, GroupChannel]
     SnowflakeTime = Union["Snowflake", datetime]
 
@@ -118,7 +125,7 @@ async def _single_delete_strategy(messages: Iterable[Message], *, reason: Option
 
 
 async def _purge_helper(
-    channel: Union[Thread, TextChannel, VoiceChannel],
+    channel: Union[Thread, TextChannel, VocalGuildChannel],
     *,
     limit: Optional[int] = 100,
     check: Callable[[Message], bool] = MISSING,
@@ -211,7 +218,9 @@ class User(Snowflake, Protocol):
     name: :class:`str`
         The user's username.
     discriminator: :class:`str`
-        The user's discriminator.
+        The user's discriminator. This is a legacy concept that is no longer used.
+    global_name: Optional[:class:`str`]
+        The user's global nickname.
     bot: :class:`bool`
         If the user is a bot account.
     system: :class:`bool`
@@ -220,6 +229,7 @@ class User(Snowflake, Protocol):
 
     name: str
     discriminator: str
+    global_name: Optional[str]
     bot: bool
     system: bool
 
@@ -240,7 +250,7 @@ class User(Snowflake, Protocol):
 
     @property
     def default_avatar(self) -> Asset:
-        """:class:`~discord.Asset`: Returns the default avatar for a given user. This is calculated by the user's discriminator."""
+        """:class:`~discord.Asset`: Returns the default avatar for a given user."""
         raise NotImplementedError
 
     @property
@@ -935,8 +945,6 @@ class GuildChannel:
             if len(permissions) > 0:
                 raise TypeError('Cannot mix overwrite and keyword arguments.')
 
-        # TODO: wait for event
-
         if overwrite is None:
             await http.delete_channel_permissions(self.id, target.id, reason=reason)
         elif isinstance(overwrite, PermissionOverwrite):
@@ -1237,6 +1245,8 @@ class GuildChannel:
         :class:`~discord.Invite`
             The invite that was created.
         """
+        if target_type is InviteTarget.unknown:
+            raise ValueError('Cannot create invite with an unknown target type')
 
         data = await self._state.http.create_invite(
             self.id,
@@ -1284,6 +1294,7 @@ class Messageable:
 
     - :class:`~discord.TextChannel`
     - :class:`~discord.VoiceChannel`
+    - :class:`~discord.StageChannel`
     - :class:`~discord.DMChannel`
     - :class:`~discord.GroupChannel`
     - :class:`~discord.PartialMessageable`
@@ -1315,6 +1326,7 @@ class Messageable:
         mention_author: bool = ...,
         view: View = ...,
         suppress_embeds: bool = ...,
+        silent: bool = ...,
     ) -> Message:
         ...
 
@@ -1334,6 +1346,7 @@ class Messageable:
         mention_author: bool = ...,
         view: View = ...,
         suppress_embeds: bool = ...,
+        silent: bool = ...,
     ) -> Message:
         ...
 
@@ -1353,6 +1366,7 @@ class Messageable:
         mention_author: bool = ...,
         view: View = ...,
         suppress_embeds: bool = ...,
+        silent: bool = ...,
     ) -> Message:
         ...
 
@@ -1372,6 +1386,7 @@ class Messageable:
         mention_author: bool = ...,
         view: View = ...,
         suppress_embeds: bool = ...,
+        silent: bool = ...,
     ) -> Message:
         ...
 
@@ -1392,6 +1407,7 @@ class Messageable:
         mention_author: Optional[bool] = None,
         view: Optional[View] = None,
         suppress_embeds: bool = False,
+        silent: bool = False,
     ) -> Message:
         """|coro|
 
@@ -1472,6 +1488,11 @@ class Messageable:
             Whether to suppress embeds for the message. This sends the message without any embeds if set to ``True``.
 
             .. versionadded:: 2.0
+        silent: :class:`bool`
+            Whether to suppress push and desktop notifications for the message. This will increment the mention counter
+            in the UI, but will not actually send a notification.
+
+            .. versionadded:: 2.2
 
         Raises
         --------
@@ -1514,10 +1535,12 @@ class Messageable:
         if view and not hasattr(view, '__discord_ui_view__'):
             raise TypeError(f'view parameter must be View not {view.__class__.__name__}')
 
-        if suppress_embeds:
+        if suppress_embeds or silent:
             from .message import MessageFlags  # circular import
 
-            flags = MessageFlags._from_value(4)
+            flags = MessageFlags._from_value(0)
+            flags.suppress_embeds = suppress_embeds
+            flags.suppress_notifications = silent
         else:
             flags = MISSING
 
@@ -1540,7 +1563,7 @@ class Messageable:
             data = await state.http.send_message(channel.id, params=params)
 
         ret = state.create_message(channel=channel, data=data)
-        if view:
+        if view and not view.is_finished():
             state.store_view(view, ret.id)
 
         if delete_after is not None:
@@ -1701,12 +1724,12 @@ class Messageable:
 
         async def _around_strategy(retrieve: int, around: Optional[Snowflake], limit: Optional[int]):
             if not around:
-                return []
+                return [], None, 0
 
             around_id = around.id if around else None
             data = await self._state.http.logs_from(channel.id, retrieve, around=around_id)
 
-            return data, None, limit
+            return data, None, 0
 
         async def _after_strategy(retrieve: int, after: Optional[Snowflake], limit: Optional[int]):
             after_id = after.id if after else None
@@ -1819,7 +1842,7 @@ class Connectable(Protocol):
     async def connect(
         self,
         *,
-        timeout: float = 60.0,
+        timeout: float = 30.0,
         reconnect: bool = True,
         cls: Callable[[Client, Connectable], T] = VoiceClient,
         self_deaf: bool = False,
@@ -1835,7 +1858,7 @@ class Connectable(Protocol):
         Parameters
         -----------
         timeout: :class:`float`
-            The timeout in seconds to wait for the voice endpoint.
+            The timeout in seconds to wait the connection to complete.
         reconnect: :class:`bool`
             Whether the bot should automatically attempt
             a reconnect if a part of the handshake fails

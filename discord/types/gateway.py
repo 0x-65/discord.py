@@ -100,6 +100,9 @@ class MessageReactionAddEvent(TypedDict):
     emoji: PartialEmoji
     member: NotRequired[MemberWithUser]
     guild_id: NotRequired[Snowflake]
+    message_author_id: NotRequired[Snowflake]
+    burst: bool
+    burst_colors: NotRequired[List[str]]
 
 
 class MessageReactionRemoveEvent(TypedDict):
@@ -108,6 +111,7 @@ class MessageReactionRemoveEvent(TypedDict):
     message_id: Snowflake
     emoji: PartialEmoji
     guild_id: NotRequired[Snowflake]
+    burst: bool
 
 
 class MessageReactionRemoveAllEvent(TypedDict):
@@ -216,6 +220,7 @@ class GuildMemberUpdateEvent(TypedDict):
     user: User
     avatar: Optional[str]
     joined_at: Optional[str]
+    flags: int
     nick: NotRequired[str]
     premium_since: NotRequired[Optional[str]]
     deaf: NotRequired[bool]

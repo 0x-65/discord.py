@@ -31,6 +31,7 @@ from copy import deepcopy
 from typing import TYPE_CHECKING, Any, Dict, Optional, Sequence, ClassVar, List
 
 from ..utils import MISSING, find
+from .._types import ClientT
 from .item import Item
 from .view import View
 
@@ -63,6 +64,7 @@ class Modal(View):
 
     .. code-block:: python3
 
+        import discord
         from discord import ui
 
         class Questionnaire(ui.Modal, title='Questionnaire Response'):
@@ -134,7 +136,7 @@ class Modal(View):
 
         super().__init__(timeout=timeout)
 
-    async def on_submit(self, interaction: Interaction, /) -> None:
+    async def on_submit(self, interaction: Interaction[ClientT], /) -> None:
         """|coro|
 
         Called when the modal is submitted.
@@ -146,7 +148,7 @@ class Modal(View):
         """
         pass
 
-    async def on_error(self, interaction: Interaction, error: Exception, /) -> None:
+    async def on_error(self, interaction: Interaction[ClientT], error: Exception, /) -> None:
         """|coro|
 
         A callback that is called when :meth:`on_submit`
